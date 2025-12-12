@@ -1,0 +1,785 @@
+---
+title: "EEZ Aqauculture Development"
+author: Megan Hessel 
+date: November 24, 2025
+execute:
+  warning: false
+  message: false
+format:
+  pdf: default
+  html: default 
+---
+
+# Prioritizing Potential Aquaculture
+
+This repository investigates temperature and depth requirements for different aquaculture species on the West Coast.
+
+Loading Libraries
+
+```{r}
+#| output: FALSE
+
+library(tidyverse)
+library(terra)
+library(stars)
+library(sf)
+library(tmap)
+library(kableExtra)
+```
+
+Downloading data - Temperature, depth, and West Coast EEZ data
+
+```{r}
+# Sea Surface Temperature
+rast_2008 <- rast(here::here('data', 'average_annual_sst_2008.tif'))
+rast_2009 <- rast(here::here('data', 'average_annual_sst_2009.tif'))
+rast_2010 <- rast(here::here('data', 'average_annual_sst_2010.tif'))
+rast_2011 <- rast(here::here('data', 'average_annual_sst_2011.tif'))
+rast_2012 <- rast(here::here('data', 'average_annual_sst_2012.tif')) 
+
+# Depth 
+bathy <- rast(here::here('data', 'depth.tif')) %>% 
+  project('EPSG:4326')
+
+# Exclusive Economic Zones
+eez <- read_sf(here::here('data', 'wc_regions_clean.shp')) 
+
+```
+
+## Coordinate Reference System
+
+Check if the CRS match and update if not
+
+```{r}
+
+# CRS UPDATING function 
+crs_update <- function (df1, df2) {
+  if (st_crs(df1) == st_crs(df2)) {
+    print("CRS match")
+  } else {
+    warning("Updating CRS") 
+    df1 <- st_transform(df2, crs = "EPSG:4326")
+    df2 <- st_transform(df2, crs = "EPSG:4326") 
+  }
+}
+
+# CRS CHECK function (with warning)
+crs_check <- function (df1, df2) {
+  if (st_crs(df1) == st_crs(df2)) {
+    print("CRS match")
+  } else {
+    warning("CRS do NOT match") 
+  }
+}
+
+# Check the dataframes
+crs_update(bathy, eez)
+crs_update(bathy, rast_2008)
+crs_update(rast_2008, rast_2009)
+crs_update(rast_2009, rast_2010)
+crs_update(rast_2010, rast_2011)
+crs_update(rast_2011, rast_2012)
+
+```
+
+## Process data
+
+**Combine** sst rasters
+
+```{r}
+# Combine Sea Surface Temperature Rasters  
+sst_rast <- c(rast_2008, rast_2009, rast_2010, rast_2011, rast_2012)
+# rast() would also work to merge 
+
+# Remove unbinded rasters 
+rm(list = c('rast_2008', 'rast_2009', 'rast_2010', 'rast_2011', 'rast_2012'))
+```
+
+Find the **mean** SST - local algebra
+
+```{r}
+# Find the mean SST
+sst_mean <- mean(sst_rast)
+```
+
+**Convert** SST from Kelvin to Celsius - global algebra
+
+```{r}
+# Subtract 273.15 
+sst_mean <- sst_mean - 273.15
+```
+
+**Crop** depth raster to match the *extent* of the SST raster
+
+```{r}
+# Extent of sst raster 
+sst_ext <- ext(sst_mean)
+
+# Crop bathy to sst raster extent
+bathy_crop <- crop(bathy, sst_ext)
+
+rm(sst_ext)
+
+```
+
+Fixing unmatching **resolutions**
+
+```{r}
+# Resample bathy / depth data to match sst raster 
+bathy_updated <- resample(bathy_crop, sst_mean, method = "bilinear")
+
+# Check resolutions 
+if (all(res(sst_rast) == res(bathy_updated))) {
+  print("Resolutions match")
+} else {
+  warning("Resolutions don't match!")
+}
+
+# Remove uncropped and unresolutioned depth dfs 
+rm(list = c('bathy', 'bathy_crop'))
+```
+
+Final Check depth and SST dfs match in resolution, extent, and coordinate reference system
+
+```{r}
+
+# Do resolutions match? 
+all(res(bathy_updated) == res(sst_mean)) # Equal in both vs all directions
+# Do extents match?
+ext(bathy_updated) == ext(sst_mean) 
+# Do CRS match? 
+crs_check(bathy_updated, sst_mean)
+
+```
+
+## Temp and Depth Map of West Coast
+
+```{r}
+#| code-fold: true
+
+# Map sst and bathy 
+bath_map <- tm_shape(bathy_updated) + 
+  tm_raster(col.legend = tm_legend(title = "Depth (m)")) + 
+  tm_title(text = "Depth (m) of West Coast") + 
+  tm_compass(position = c('right', 'top'))
+
+sst_map <- tm_shape(sst_mean) + 
+  tm_raster(col.legend = tm_legend(title = "Temperature (°C)"), 
+            col.scale = tm_scale(values = c('#ffcc84',"#FFB627", "#ff8c34", "#CC5803", "#772f1a"))) + 
+  tm_title(text = "Average Sea Surface\nTemperature of West Coast") + 
+  tm_scalebar(position = c('right', 'top')) + 
+  tm_basemap("Esri.OceanBasemap")
+
+tmap_arrange(sst_map, bath_map)
+
+```
+
+## Find suitable locations for [Oysters]{.underline}
+
+Oysters Research has shown that oysters need the following conditions for optimal growth:
+
+-   Sea surface temperature: 11-30°C
+-   Depth: 0-70 meters below sea level
+
+### Reclassifying locations that have optimal oyster temp or depth
+
+-   Unsuitable habitats = 0
+-   Suitable habitats = 1
+
+Suitable **DEPTH** (0-70 meters below sea level) vs Unsuitable locations for oysters
+
+```{r}
+# Create a reclassification matrix of values corresponding to unsuitable (1) vs suitable (2) depths for oysters 
+rcl_depth <- matrix(c(-Inf, -70, 0, # SUITABLE depth
+                      -70, 0, 1, #  SUITABLE depth
+                      0, Inf, 0), # SUITABLE depth
+                      ncol = 3, byrow = TRUE)
+
+# Apply the reclassification matrix to the raster 
+depth_reclass <- classify(bathy_updated, rcl_depth) #other = NA)
+
+# Delete matrix as object 
+rm(rcl_depth)
+```
+
+Suitable **TEMP** (11-30°C) vs Unsuitable locations for oysters
+
+```{r}
+# Create a reclassification matrix of values corresponding to unsuitable (1) vs suitable (2) temps for oysters 
+rcl_temp <- matrix(c(-Inf, 11, 0, # UNSUITABLE temp 
+                     11, 30, 1, #SUITABLE temp
+                     30, Inf, 0), #UNSUITABLE temp
+                   ncol = 3, byrow = TRUE)
+
+# Apply the reclassification matrix to the raster 
+temp_reclass <- classify(sst_mean, rcl_temp) #other =NA)
+
+# Delete matrix as object 
+rm(rcl_temp)
+```
+
+### Finding which areas have suitable depth *AND* temp for Oysters
+
+Multiplying temp and depth raster together
+
+```{r}
+
+# Check CRSs
+crs_check(temp_reclass, depth_reclass)
+
+# Multiply rasters together 
+oyst_suit_raster <- temp_reclass * depth_reclass
+
+# OTHER METHOD: FUNCTION WITH LAPP 
+# multiply <- function(layer1, layer2) { 
+#   layer1 * layer2
+# }
+# oyst_suit_raster <- lapp(c(temp_reclass,depth_reclass), fun = multiply)
+
+```
+
+Visualizing depth and temp suitability for oysters in the west coast
+
+```{r}
+#| code-fold: true
+#| warning: false
+
+# Plotting suitable habitats for Oysters 
+map_temp <- tm_shape(temp_reclass) + 
+  tm_raster(
+    col.scale = tm_scale_categorical(
+      labels = c("Unsuitable (0)", "Suitable (1) [11-30°C]"), 
+      values = c('lightblue2', 'steelblue4'),
+    ),
+    col.legend = tm_legend(title = "Suitable vs Unsuitable\nOysters Temp"))+ 
+  tm_title(text = "Suitable Temp for Oysters") + 
+  tm_compass(position = c('right', 'top'))
+
+
+map_depth <- tm_shape(depth_reclass) + 
+  tm_raster(
+    col.scale = tm_scale_categorical(
+      labels = c("Unsuitable (0)", "Suitable (1) [0-70 meters]"), 
+      values = c('lightblue2', 'steelblue4'),
+    ),
+    col.legend = tm_legend(title = "Suitable vs Unsuitable\nOysters Depth")
+  ) + 
+  tm_title(text = "Suitable Depth for Oysters")
+
+
+map_oyst <- tm_shape(oyst_suit_raster) + 
+  tm_raster(
+    col.scale = tm_scale_categorical(
+      labels = c("Unsuitable (0)", "Suitable (1)"), 
+      values = c('lightblue2', 'red'),
+    ),
+    col.legend = tm_legend(title = "Suitable vs Unsuitable\nOysters Habitat")) + 
+  tm_title(text = "Suitable Depth & Temp for Oysters") + 
+  tm_scalebar(position = c('left', 'bottom')) 
+
+tmap_arrange(map_temp, map_depth, map_oyst)
+
+# Remove maps as objects 
+rm(list = c('map_temp', 'map_depth', 'map_oyst'))
+
+```
+
+## Determining most suitable EEZ
+
+**Mask** the Oyster raster to the EEZ geometries
+
+```{r}
+
+# Check is crs match 
+crs_check(oyst_suit_raster, eez)
+
+# Mask suitable hab raster to the EEZ area 
+oyst_suit_crop <- mask(oyst_suit_raster, eez)
+```
+
+### Plot Oyster suitability *within* the EEZ areas
+
+```{r}
+#| code-fold: true
+
+# Check if it masked 
+tm_shape(oyst_suit_crop) + 
+  tm_raster(
+    col.scale = tm_scale_categorical(
+      labels = c("Unsuitable (0)", "Suitable (1)"), 
+      values = c('lightblue2', 'red'),
+    ),
+    col.legend = tm_legend(title = "Suitable vs Unsuitable\nOysters Habitat")) + 
+  tm_title(text = "Suitable Depth & Temp for Oysters within\nthe West Coast Exclusive Economic Zones") + 
+  tm_shape(eez) + 
+  tm_polygons( 
+              lwd = 0.25, 
+              fill = "peachpuff2", 
+              fill_alpha = 0.2) + 
+  tm_scalebar(position = c('left', 'bottom'), 
+              margins = 1
+              ) +
+  tm_compass(position = c('right', 'top')) + 
+  tm_credits(text = "Oysters perfer depths of 0-70m and temps of 11-30°C.") + 
+  tm_basemap("Esri.OceanBasemap")
+```
+
+### Find **Area** of Suitable habitat in West Coast EEZs
+
+Total Area of all West Coast EEZ
+
+```{r}
+# Total area of all West Coast EEZ 
+print(paste("The total area of all West Coast EEZs is", round(sum(st_area(eez))/1e9,2), "x 10^9 m^2"))
+
+```
+
+Total Oyster suitable habitat in West Coast EEZ
+
+```{r}
+# Creating raster of JUST the suitable habitats [1]
+oyst_1 <- oyst_suit_crop
+oyst_1[oyst_1  == 0] <- NA # unsuitable hab are 'NAs'
+
+
+# Find total area of suitable habitats 
+area <- expanse(oyst_1)[1,2] 
+# Expense computes the area covered by raster cells that are not NA 
+
+print(paste("The area of all suitable oyster habitats in the West Coast EEZs is", round(area/1e9, 2), "x 10^9 m^2"))
+
+```
+
+**Trying new things**
+```{r}
+
+for (i in unique(eez$rgn)) {
+  zone <- eez %>% filter(rgn == i)
+  crs_check(zone, oyst_1)
+  oyst_zone <- mask(oyst_1, zone)
+  area <- expanse(oyst_zone)[1,2] 
+  
+  zone[, 'area_suit_hab'] <- NA
+  zone$area_suit_hab <- area
+ 
+  df_list <- list()
+  df_list[[i]] <- data.frame(
+    rgn = i, 
+     area_per_eez = paste(round(area / 1e8, 2), "x 10^8")
+  )
+  
+  }
+
+  eez_plus <- do.call(rbind, df_list)
+  eez_plus
+  
+  # table <- eez_plus %>% 
+  #   select(rgn, area_suit_hab) %>% 
+  #   st_drop_geometry()
+
+  #table
+
+```
+
+
+Initial generalized function to find the area of suitable habitat for a species per each West Coast EEZ
+
+```{r}
+
+df_list <- list()
+  
+# For loop to get area of each eez
+for (i in unique(eez$rgn)) {
+    area_eez <- eez %>% filter(rgn == i) #
+    spec_per_eez <- mask(oyst_1, area_eez)
+    area_per_eez <- expanse(spec_per_eez)[1, 2]
+    
+    # Create dataframe
+    df_list[[i]] <- data.frame(
+      #rgn = i,
+    area = paste(round(area_per_eez / 1e8, 2), "x 10^8")
+    )
+  }
+
+# The dataframe
+df_suit_area_eez <- do.call(rbind, df_list)
+  
+# Output a kable table
+kable(
+    df_suit_area_eez,
+    align = 'c',
+    col.names = c("EEZ location", "Suitable Habitat Area")
+  )
+  
+```
+
+Oysters have a large amount of suitable habitats in Washington, Central CA, and Southern CA. Central and South California's temperature, ranging from 12°C to 20°C, is fully within the limits of oysters preferences. Additionally, oysters have a depth span of 0-70 meters below sea level, meaning oysters will reside closer to the coastline. The Washington and South California's Exclusive Economic Zones offer a larger continental shelf where oysters can thrive. In conclusion, when mixing oysters depth and temperature preferences, Washington, Central CA, and Southern CA offer the most suitable habitats.
+
+------------------------------------------------------------------------
+
+## The Function
+
+Create a function that does everything above for you
+
+```{r}
+
+habitat <- function(depth_df,
+                    temp_df,
+                    depth_min,
+                    depth_max,
+                    temp_min,
+                    temp_max,
+                    species_name,
+                    eez_df) {
+  
+  # PART 1: MATRIX, RECLASSIFY, COMBINED, MASK, TOTAL AREA ********************************** 
+  # Reclass matrix - DEPTH
+  rcl_depth <- matrix(
+    c(-Inf, depth_min, 0, # SUITABLE depth
+      depth_min, depth_max, 1, #  SUITABLE depth
+      depth_max, Inf, 0), # SUITABLE depth
+    ncol = 3,
+    byrow = TRUE
+  )
+  # Reclass matrix - TEMP
+  rcl_temp <- matrix(
+    c(-Inf, temp_min, 0, # UNSUITABLE temp
+      temp_min, temp_max, 1, #SUITABLE temp
+      temp_max, Inf, 0), #UNSUITABLE temp
+    ncol = 3,
+    byrow = TRUE
+  )
+  
+  
+  # Apply the reclassification matrix to the raster
+  depth_reclass <- classify(depth_df, rcl_depth)
+  temp_reclass <- classify(temp_df, rcl_temp)
+  
+  # Check (and change crs if necessary)
+  if (st_crs(temp_reclass) == st_crs(depth_reclass)) {
+    print("CRS match")
+  } else {
+    warning("Updating CRS")
+    temp_reclass <- st_transform(temp_reclass, crs = crs(depth_reclass))
+  }
+  
+  # Multiply rasters
+  suit_raster <- temp_reclass * depth_reclass
+  
+  # Crop to eez area
+  species_raster_pre <- mask(suit_raster, eez_df)
+  
+  # Select only suitable habitats
+  species_raster <- species_raster_pre
+  species_raster[species_raster  == 0] <- NA
+  
+  # Area of all suitable habitat
+  area <- expanse(species_raster)[1, 2]
+  
+  print(paste(
+      "The area of all suitable",
+      species_name,
+      "habitats in the West Coast EEZs is",
+      round(area / 1e9, 2),
+      "x 10^9 m^2"
+    )
+  )
+  
+   # Check (and change crs if necessary)
+  if (crs(species_raster) == crs(eez_df)) {
+    print("CRS match")
+  } else {
+    warning("Updating CRS")
+    eez_df <- transform(eez_df, crs = crs(species_raster))
+  }
+
+  # PART 2: FIND AREA PER EEZ --> DATAFRAME ********************************* 
+  # Empty list to feed for loop into after
+  df_list <- list()
+  
+  # For loop to get area of each eez
+  for (i in unique(eez_df$rgn)) {
+    area_eez <- eez_df %>% filter(rgn == i) #
+    spec_per_eez <- mask(species_raster, area_eez)
+    area_per_eez <- expanse(spec_per_eez)[1, 2]
+    
+    # Create dataframe
+    df_list[[i]] <- data.frame(
+      #rgn = i,
+      area = area_per_eez
+      #paste(round(area_per_eez / 1e8, 2), "x 10^8")
+    )
+    
+  }
+  
+  
+  # The dataframe for the table 
+  df_suit_area_eez <- do.call(rbind, df_list)
+  # geodata frame for the map 
+  eez_df[, 'area_suit_hab'] <- NA # Create new column 
+  eez_df$area_suit_hab <- df_suit_area_eez$area
+  
+  
+  # Output a kable table
+  print(kable(
+    df_suit_area_eez,
+    align = 'c',
+    format.args = list(scientific = TRUE, digits = 3), 
+    col.names = c("EEZ location", "Suitable Habitat Area (m)")
+   ))
+  
+  
+  # printing geodataframe 
+  #print(eez_df)
+  
+  
+  
+  # PART 2: MAKING MAPS ********************************* 
+  
+  # DEPTH AND TEMP MAPS
+  
+  # Plotting suitable habitats for Oysters
+  map_temp <- tm_shape(temp_reclass) +
+    tm_raster(
+      col.scale = tm_scale_categorical(
+        labels = c("Unsuitable (0)", "Suitable (1)"),
+        values = c('lightblue2', 'steelblue4'),
+      ),
+      col.legend = tm_legend(title = "Suitable vs Unsuitable Temp")
+    ) +
+    tm_title(text = paste("Suitable Temp for", species_name)) +
+    tm_compass(position = c('right', 'top'))
+  
+  
+  map_depth <- tm_shape(depth_reclass) +
+    tm_raster(
+      col.scale = tm_scale_categorical(
+        labels = c("Unsuitable (0)", "Suitable (1)"),
+        values = c('lightblue2', 'steelblue4'),
+      ),
+      col.legend = tm_legend(title = paste("Suitable vs Unsuitable Depth"))
+    ) +
+    tm_title(text = paste("Suitable Depth for", species_name))
+  
+  
+  
+  map_both <- tm_shape(suit_raster) +
+    tm_raster(
+      col.scale = tm_scale_categorical(
+        labels = c("Unsuitable (0)", "Suitable (1)"),
+        values = c('lightblue2', 'red'),
+      ),
+      col.legend = tm_legend(title = "Suitable vs Unsuitable Habitat")
+    ) +
+    tm_shape(eez_df) + 
+      tm_polygons(
+        fill_alpha = 0, 
+        col = 'black', 
+        lwd = 0.2) + 
+    tm_title(text = paste("Suitable Depth & Temp for", species_name)) +
+    tm_scalebar(position = c('left', 'bottom'))
+  
+  print(tmap_arrange(map_temp, map_depth, map_both))
+  
+  
+  
+  # MAIN MAP OF SUITABLE HABITAT
+  output_map <- tm_shape(eez_df, 
+                         bbox = sf::st_bbox(c(
+                           xmin = -131, xmax = -110,
+                           ymin = 30,  ymax = 50))) +
+    tm_polygons(
+      fill = 'area_suit_hab', 
+      fill.legend = tm_legend(title = "Total Suitable\nHabitat Area (km^2)", 
+                              # orientation = 'landscape', 
+                              # position = tm_pos_out("center", "bottom", pos.h = "center")
+                              ),
+      #fill.scale = tm_scale(values = 'Brewer.yl_gn') 
+      fill.scale = tm_scale_continuous(n = 4, 
+                                       values = 'brewer.YlOrBr'), 
+    ) +
+    tm_title(text = paste("Suitable Habitat for", species_name, "within\nthe West Coast Exclusive Economic Zones")) +
+    tm_scalebar(position = c('right', 'top'), margins = 1) +
+    tm_compass(position = c('right', 'bottom')) +
+    tm_basemap("Esri.OceanBasemap") + 
+    tm_text('rgn', size = 0.5) + 
+    tm_credits(text = paste0(species_name," perfer depths of ", depth_min," to ", depth_max, "(m) and temps of ", temp_min, " to ", temp_max, "°C.")) + 
+     tm_layout(legend.outside.position = "bottom")
+
+  
+  print(output_map)
+  
+  
+}
+
+
+```
+
+Apply the Function to Oysters - Sea surface temperature: 11-30°C - Depth: 0-70 meters below sea level
+
+```{r}
+
+# Use function 
+df_suit_area_eez <- habitat(
+    depth_df = bathy_updated,
+    temp_df = sst_mean, 
+    depth_min = -70,
+    depth_max = 0,
+    temp_min = 11,
+    temp_max = 30,
+    species_name = 'Oysters',
+    eez_df = eez
+) 
+
+```
+
+------------------------------------------------------------------------
+
+## Suitable locations for [Siliqua-patula]{.underline}
+
+The Pacific razor clam location ranges from the Aleutian Islands in Alaska to Pismo Beach, California. The clam is typically discovered in depths between 0-55m, and its preferred temperature is around 5°C (estimating 0°C - 10°C).
+
+Therefore, Pacific razor clam research has shown that the clams need the following conditions for optimal growth:
+
+-   Sea surface temperature: 0-10°C
+
+-   Depth: 0-55 meters below sea level
+
+### Use Function to Find Suitable Habitat for clams in West Coast EEZs
+
+```{r}
+
+# Use function 
+df_suit_area_eez <- habitat(
+    depth_df = bathy_updated,
+    temp_df = sst_mean, 
+    depth_min = 0,
+    depth_max = 55,
+    temp_min = 0,
+    temp_max = 10,
+    species_name = 'Clams',
+    eez_df = eez
+) 
+
+```
+
+### Additional Map For Clams
+
+I wanted to see Washington better, so I created tailored map to look at Washington
+
+```{r}
+#| code-fold: true
+#| warning: false
+
+# Creating dataframes in order to plot 
+rcl_depth_clam <- matrix(c(-Inf, -55, 0, # UNSUITABLE
+                      -55, 0, 1, #  SUITABLE HABITAT
+                      0, Inf, 0), # UNSUITABL
+                      ncol = 3, byrow = TRUE)
+# Temp matrix 
+rcl_temp_clam <- matrix(c(-Inf, 0, 0, # UNSUITABLE
+                      0, 10, 1, #  SUITABLE HABITAT
+                      10, Inf, 0), # UNSUITABL
+                      ncol = 3, byrow = TRUE)
+
+# Apply the reclassification matrix to the depth and temp rasters 
+depth_reclass_clam <- classify(bathy_updated, rcl_depth_clam)
+temp_reclass_clam <- classify(sst_mean, rcl_temp_clam)
+
+# Remove matrixs as objects 
+rm(list = c('rcl_depth_clam', 'rcl_temp_clam'))
+
+# Multiple temp and depth rasters 
+clam_suit_raster <- depth_reclass_clam * temp_reclass_clam
+# Crop to EEZs 
+clam_suit_crop <- mask(clam_suit_raster, eez) 
+
+
+
+# bbox of Washington EEZ 
+washington <- eez %>% filter(rgn_key == 'WA')
+clam_suit_washington <- mask(clam_suit_crop, washington)
+
+
+
+# Inset map of Just clams in Washington 
+washington_inset <- tm_shape(
+   clam_suit_washington, 
+   bbox = sf::st_bbox(c(
+    xmin = -129.5, xmax = -122,
+    ymin = 45.5,  ymax = 49
+  )), 
+  crs = st_crs(clam_suit_washington) ) + 
+  tm_raster( 
+    col.scale = tm_scale_categorical(
+      values = c('lightblue2', 'red')), 
+    col.legend = tm_legend_hide()) +
+  tm_shape(washington) + 
+  tm_polygons(lwd = 0.35, 
+              fill = "peachpuff2", 
+              fill_alpha = 0.2) +
+  tm_title(text = "Washington's EEZ", 
+           position = tm_pos_in(), 
+           size = 0.8) +
+ tm_basemap("Esri.OceanBasemap") + 
+  tm_scalebar(position = c('right', 'bottom'))
+
+ 
+# TEMP AND DEPTH AND EEZ MAP 
+tm_shape(
+  clam_suit_crop, 
+     bbox = sf::st_bbox(c(
+    xmin = -131, xmax = -110,
+    ymin = 30,  ymax = 50
+  )), 
+  crs = st_crs(clam_suit_crop)) + 
+  tm_raster(
+    col.scale = tm_scale_categorical(
+      labels = c("Unsuitable (0)", "Suitable (1)"), 
+      values = c('lightblue2', 'red'),
+    ),
+    col.legend = tm_legend(title = "Suitable vs Unsuitable\nOysters Habitat", 
+                           position = tm_pos_in('right', 'center'), 
+                           title.size = 0.6, 
+                           text.size = 0.5, 
+                           bg.alpha = 0.5)
+    ) + 
+  tm_title(text = "Suitable Depth & Temp for Clams\nwithin the West Coast EEZs") + 
+  tm_shape(eez) + 
+  tm_polygons(lwd = 0.35, 
+              fill = "peachpuff2", 
+              fill_alpha = 0.2) + 
+  tm_basemap("Esri.OceanBasemap") +
+  tm_compass(position = c('left', 'bottom'))+ 
+  tm_scalebar(position = c('left', 'bottom')) +
+  tm_inset(washington_inset, 
+           position = tm_pos_out(), 
+           width = 15, 
+           height = 15)
+
+
+
+# Remove objects 
+rm(list = c('map_temp_clam', 'map_depth_clam', 'map_clam', 'clam_suit_washington', 'washington'))
+
+
+```
+
+
+The Pacific razor clam requires cold temperatures ranging from  0  to 10°C and shallow depths from 0 to 55m, This pins the clams to the coastline and to the North. Hence, Washington's Exclusive Economic Zone has the most suitable habitat for the Pacific razor clam. 
+
+
+
+## Reflection 
+
+The suitable habitat function creates a reclassification matrix based on the depth and temperature parameters. The reclassification matrix is then turned into a raster of the species' suitable habitat, which is then cropped and masked within the West coast exclusive economic zones (EEZs). Subsequently, the function filters through and finds the area of suitable habitat for each EEZ (Washington, Oregon, North, Central, and South California). Finally, the function creates a table and multiple maps to display suitable depth, temperature, the interaction of the two, and the area per each EEZ. 
+
+Within this study, suitable habitat is only dictated by depth and temperature ranges. However, habitat suitability includes other features, such as water quality, human disturbance, and physical structures. Therefore, the lack of other important parameters limits this study. Furthermore, the function used the average temperature and depth measurements, not accounting for climate variation. In future studies, other parameters such as seasonality and water quality data could be added into the function to improve accuracy. 
+
+
+## References 
+Hall, S. J., Delaporte, A., Phillips, M. J., Beveridge, M. & O’Keefe, M. Blue Frontiers: Managing the Environmental Costs of Aquaculture (The WorldFish Center, Penang, Malaysia, 2011).↩︎
+
+Gentry, R. R., Froehlich, H. E., Grimm, D., Kareiva, P., Parke, M., Rust, M., Gaines, S. D., & Halpern, B. S. Mapping the global potential for marine aquaculture. Nature Ecology & Evolution, 1, 1317-1324 (2017).↩︎
+
+GEBCO Compilation Group (2022) GEBCO_2022 Grid (doi:10.5285/e0f0bb80-ab44-2739-e053-6c86abc0289c)
