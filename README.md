@@ -3,8 +3,6 @@
 
 ### PURPOSE
 
-This repository 
-
 By examining species' temperature and depth requirements, this repository determines which West Coast Exclusive Economic Zones (EEZ) is best suited for various marine aquaculture species. Specifically, we study oysters and Siliqua-patula (Pacific razor clam). 
 
 
